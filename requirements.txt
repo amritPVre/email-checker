@@ -1,0 +1,5 @@
+streamlit>=1.35
+pandas>=2.0
+openpyxl>=3.1
+xlsxwriter>=3.1
+dnspython>=2.6
