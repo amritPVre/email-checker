@@ -233,14 +233,23 @@ def combined_excel_bytes(full_df: pd.DataFrame, valid_df: pd.DataFrame,
 # Streamlit UI
 # --------------------------------------------------------------------------
 
-st.set_page_config(page_title="Bulk Email Validator", page_icon="📧", layout="centered")
+st.set_page_config(page_title="Email Toolkit", page_icon="📧", layout="centered")
 
-st.title("📧 Bulk Email Validator")
-st.caption("Upload an Excel file of email addresses → get back a Valid list and an Inactive/Invalid list.")
+st.title("📧 Email Toolkit")
+st.caption("Two tools: validate a list of emails, or strip duplicates out of one.")
 
-with st.expander("How this works / what each check means", expanded=False):
-    st.markdown(
-        """
+tab_validate, tab_dedupe = st.tabs(["✅ Email Validator", "🧹 Duplicate Remover"])
+
+# ==========================================================================
+# TAB 1 — Email Validator
+# ==========================================================================
+with tab_validate:
+    st.subheader("Bulk Email Validator")
+    st.caption("Upload an Excel file of email addresses → get back a Valid list and an Inactive/Invalid list.")
+
+    with st.expander("How this works / what each check means", expanded=False):
+        st.markdown(
+            """
 - **Syntax check** — catches typos and malformed addresses (always on).
 - **Disposable check** — flags known temp-mail domains like `mailinator.com` (optional).
 - **MX record check** — confirms the domain actually has a mail server set up to receive email (always on).
@@ -251,129 +260,266 @@ with st.expander("How this works / what each check means", expanded=False):
 port 25, which this check needs. When that happens, the app reports the address as **Unknown**
 rather than guessing. Syntax + MX checks alone already catch typos, dead domains, and most fake
 addresses reliably in any environment.
-        """
-    )
-
-uploaded_file = st.file_uploader("Upload Excel file (.xlsx or .xls)", type=["xlsx", "xls"])
-
-if uploaded_file:
-    try:
-        df_raw = pd.read_excel(uploaded_file)
-    except Exception as e:
-        st.error(f"Couldn't read that file: {e}")
-        st.stop()
-
-    if df_raw.empty:
-        st.warning("The uploaded file has no rows.")
-        st.stop()
-
-    st.success(f"Loaded {len(df_raw)} rows with columns: {', '.join(map(str, df_raw.columns))}")
-
-    # Guess the email column
-    guessed_col = None
-    for col in df_raw.columns:
-        if "email" in str(col).lower():
-            guessed_col = col
-            break
-    if guessed_col is None:
-        guessed_col = df_raw.columns[0]
-
-    email_col = st.selectbox(
-        "Which column contains the email addresses?",
-        options=list(df_raw.columns),
-        index=list(df_raw.columns).index(guessed_col),
-    )
-
-    st.subheader("Settings")
-    col1, col2 = st.columns(2)
-    with col1:
-        do_disposable = st.checkbox("Flag disposable / temp-mail domains", value=True)
-        do_smtp = st.checkbox("Run SMTP mailbox check (slower, may be blocked on some networks)", value=False)
-    with col2:
-        max_workers = st.slider("Parallel workers", min_value=1, max_value=40, value=DEFAULT_MAX_WORKERS)
-        smtp_timeout = st.slider("SMTP timeout (seconds)", min_value=3, max_value=20, value=DEFAULT_SMTP_TIMEOUT,
-                                  disabled=not do_smtp)
-
-    smtp_sender = "verify@example.com"
-    if do_smtp:
-        smtp_sender = st.text_input(
-            "Sender address to use for the SMTP handshake (any address, doesn't need to be real)",
-            value="verify@example.com",
+            """
         )
 
-    run = st.button("Run validation", type="primary")
+    uploaded_file = st.file_uploader("Upload Excel file (.xlsx or .xls)", type=["xlsx", "xls"], key="validator_upload")
 
-    if run:
-        emails = df_raw[email_col].astype(str).tolist()
-        total = len(emails)
+    if uploaded_file:
+        try:
+            df_raw = pd.read_excel(uploaded_file)
+        except Exception as e:
+            st.error(f"Couldn't read that file: {e}")
+            st.stop()
 
-        progress_bar = st.progress(0, text=f"Checking 0 / {total}...")
-        status_text = st.empty()
-        start_time = time.time()
+        if df_raw.empty:
+            st.warning("The uploaded file has no rows.")
+            st.stop()
 
-        def update_progress(done, total):
-            progress_bar.progress(done / total, text=f"Checking {done} / {total}...")
+        st.success(f"Loaded {len(df_raw)} rows with columns: {', '.join(map(str, df_raw.columns))}")
 
-        results = run_batch(
-            emails, do_smtp, do_disposable, smtp_sender, smtp_timeout, max_workers,
-            progress_callback=update_progress,
+        # Guess the email column
+        guessed_col = None
+        for col in df_raw.columns:
+            if "email" in str(col).lower():
+                guessed_col = col
+                break
+        if guessed_col is None:
+            guessed_col = df_raw.columns[0]
+
+        email_col = st.selectbox(
+            "Which column contains the email addresses?",
+            options=list(df_raw.columns),
+            index=list(df_raw.columns).index(guessed_col),
+            key="validator_col",
         )
 
-        elapsed = time.time() - start_time
-        progress_bar.progress(1.0, text=f"Done — checked {total} emails in {elapsed:.1f}s")
+        st.subheader("Settings")
+        col1, col2 = st.columns(2)
+        with col1:
+            do_disposable = st.checkbox("Flag disposable / temp-mail domains", value=True)
+            do_smtp = st.checkbox("Run SMTP mailbox check (slower, may be blocked on some networks)", value=False)
+        with col2:
+            max_workers = st.slider("Parallel workers", min_value=1, max_value=40, value=DEFAULT_MAX_WORKERS)
+            smtp_timeout = st.slider("SMTP timeout (seconds)", min_value=3, max_value=20, value=DEFAULT_SMTP_TIMEOUT,
+                                      disabled=not do_smtp)
 
-        # Build result dataframe, preserving all original columns
-        result_df = df_raw.copy()
-        result_df["Status"] = [r.status for r in results]
-        result_df["Reason"] = [r.reason for r in results]
-        result_df["MX Host"] = [r.mx_host for r in results]
-
-        valid_df = result_df[result_df["Status"] == STATUS_VALID].reset_index(drop=True)
-        invalid_df = result_df[result_df["Status"] == STATUS_INVALID].reset_index(drop=True)
-        unknown_df = result_df[result_df["Status"] == STATUS_UNKNOWN].reset_index(drop=True)
-
-        st.subheader("Results")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total", total)
-        m2.metric("✅ Valid", len(valid_df))
-        m3.metric("❌ Invalid / Inactive", len(invalid_df))
-        m4.metric("❓ Unknown", len(unknown_df))
-
-        st.dataframe(result_df, use_container_width=True, height=350)
-
-        st.subheader("Download")
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            st.download_button(
-                "⬇️ Valid emails (.xlsx)",
-                data=to_excel_bytes(valid_df, "Valid"),
-                file_name="valid_emails.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        with d2:
-            st.download_button(
-                "⬇️ Invalid / Inactive emails (.xlsx)",
-                data=to_excel_bytes(invalid_df, "Invalid"),
-                file_name="invalid_emails.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        with d3:
-            st.download_button(
-                "⬇️ Full report, all tabs (.xlsx)",
-                data=combined_excel_bytes(result_df, valid_df, invalid_df, unknown_df),
-                file_name="email_validation_report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+        smtp_sender = "verify@example.com"
+        if do_smtp:
+            smtp_sender = st.text_input(
+                "Sender address to use for the SMTP handshake (any address, doesn't need to be real)",
+                value="verify@example.com",
             )
 
-        if len(unknown_df):
-            st.info(
-                f"{len(unknown_df)} address(es) came back Unknown — usually because the SMTP check "
-                "was blocked or the mail server didn't give a clear answer. These are in the "
-                "'Unknown' tab of the full report; treat them as risky-but-not-confirmed-dead."
+        run = st.button("Run validation", type="primary")
+
+        if run:
+            emails = df_raw[email_col].astype(str).tolist()
+            total = len(emails)
+
+            progress_bar = st.progress(0, text=f"Checking 0 / {total}...")
+            status_text = st.empty()
+            start_time = time.time()
+
+            def update_progress(done, total):
+                progress_bar.progress(done / total, text=f"Checking {done} / {total}...")
+
+            results = run_batch(
+                emails, do_smtp, do_disposable, smtp_sender, smtp_timeout, max_workers,
+                progress_callback=update_progress,
             )
-else:
-    st.info("Upload an Excel file to get started. It should have a column of email addresses "
-            "(any column name containing 'email' will be auto-detected).")
+
+            elapsed = time.time() - start_time
+            progress_bar.progress(1.0, text=f"Done — checked {total} emails in {elapsed:.1f}s")
+
+            # Build result dataframe, preserving all original columns
+            result_df = df_raw.copy()
+            result_df["Status"] = [r.status for r in results]
+            result_df["Reason"] = [r.reason for r in results]
+            result_df["MX Host"] = [r.mx_host for r in results]
+
+            valid_df = result_df[result_df["Status"] == STATUS_VALID].reset_index(drop=True)
+            invalid_df = result_df[result_df["Status"] == STATUS_INVALID].reset_index(drop=True)
+            unknown_df = result_df[result_df["Status"] == STATUS_UNKNOWN].reset_index(drop=True)
+
+            st.subheader("Results")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total", total)
+            m2.metric("✅ Valid", len(valid_df))
+            m3.metric("❌ Invalid / Inactive", len(invalid_df))
+            m4.metric("❓ Unknown", len(unknown_df))
+
+            st.dataframe(result_df, use_container_width=True, height=350)
+
+            st.subheader("Download")
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.download_button(
+                    "⬇️ Valid emails (.xlsx)",
+                    data=to_excel_bytes(valid_df, "Valid"),
+                    file_name="valid_emails.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            with d2:
+                st.download_button(
+                    "⬇️ Invalid / Inactive emails (.xlsx)",
+                    data=to_excel_bytes(invalid_df, "Invalid"),
+                    file_name="invalid_emails.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            with d3:
+                st.download_button(
+                    "⬇️ Full report, all tabs (.xlsx)",
+                    data=combined_excel_bytes(result_df, valid_df, invalid_df, unknown_df),
+                    file_name="email_validation_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+            if len(unknown_df):
+                st.info(
+                    f"{len(unknown_df)} address(es) came back Unknown — usually because the SMTP check "
+                    "was blocked or the mail server didn't give a clear answer. These are in the "
+                    "'Unknown' tab of the full report; treat them as risky-but-not-confirmed-dead."
+                )
+    else:
+        st.info("Upload an Excel file to get started. It should have a column of email addresses "
+                "(any column name containing 'email' will be auto-detected).")
+
+# ==========================================================================
+# TAB 2 — Duplicate Remover
+# ==========================================================================
+with tab_dedupe:
+    st.subheader("Duplicate Email Remover")
+    st.caption("Upload a list of emails → get back a de-duplicated list, plus a report of what was removed.")
+
+    with st.expander("How this works", expanded=False):
+        st.markdown(
+            """
+- Compares addresses **case-insensitively** and trims stray whitespace by default
+  (`John@Gmail.com` and `john@gmail.com ` count as the same address) — this is a toggle.
+- Keeps the **first occurrence** of each address (in the order it appears in your file) and
+  drops the rest.
+- Every other column in your row is preserved for the kept record.
+- You get back three things: the de-duplicated list, a report of just the removed duplicate
+  rows, and a full report with both as separate tabs.
+            """
+        )
+
+    dedupe_file = st.file_uploader("Upload Excel file (.xlsx or .xls)", type=["xlsx", "xls"], key="dedupe_upload")
+
+    if dedupe_file:
+        try:
+            dedupe_raw = pd.read_excel(dedupe_file)
+        except Exception as e:
+            st.error(f"Couldn't read that file: {e}")
+            st.stop()
+
+        if dedupe_raw.empty:
+            st.warning("The uploaded file has no rows.")
+            st.stop()
+
+        st.success(f"Loaded {len(dedupe_raw)} rows with columns: {', '.join(map(str, dedupe_raw.columns))}")
+
+        guessed_col = None
+        for col in dedupe_raw.columns:
+            if "email" in str(col).lower():
+                guessed_col = col
+                break
+        if guessed_col is None:
+            guessed_col = dedupe_raw.columns[0]
+
+        dedupe_col = st.selectbox(
+            "Which column contains the email addresses?",
+            options=list(dedupe_raw.columns),
+            index=list(dedupe_raw.columns).index(guessed_col),
+            key="dedupe_col",
+        )
+
+        case_insensitive = st.checkbox("Treat different capitalization as the same address (recommended)", value=True)
+        strip_dots_gmail = st.checkbox(
+            "Also treat Gmail dot-variants as duplicates (e.g. john.doe@gmail.com = johndoe@gmail.com)",
+            value=False,
+            help="Gmail ignores dots in the local part of the address, so these actually deliver to the same inbox. "
+                 "Off by default since it's Gmail-specific behavior, not a universal email rule.",
+        )
+
+        run_dedupe = st.button("Remove duplicates", type="primary")
+
+        if run_dedupe:
+            work_df = dedupe_raw.copy()
+            raw_emails = work_df[dedupe_col].astype(str)
+
+            def normalize(addr: str) -> str:
+                addr = addr.strip()
+                if case_insensitive:
+                    addr = addr.lower()
+                if strip_dots_gmail and "@" in addr:
+                    local, _, domain = addr.partition("@")
+                    if domain in ("gmail.com", "googlemail.com"):
+                        local = local.split("+")[0].replace(".", "")
+                        addr = f"{local}@{domain}"
+                return addr
+
+            work_df["_normalized_key"] = raw_emails.map(normalize)
+
+            is_dup = work_df.duplicated(subset="_normalized_key", keep="first")
+            unique_df = work_df[~is_dup].drop(columns="_normalized_key").reset_index(drop=True)
+            duplicates_df = work_df[is_dup].drop(columns="_normalized_key").reset_index(drop=True)
+
+            st.subheader("Results")
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Total rows", len(work_df))
+            r2.metric("✅ Unique (kept)", len(unique_df))
+            r3.metric("🗑️ Duplicates (removed)", len(duplicates_df))
+
+            st.markdown("**Unique list preview**")
+            st.dataframe(unique_df, use_container_width=True, height=250)
+
+            if len(duplicates_df):
+                st.markdown("**Removed duplicates preview**")
+                st.dataframe(duplicates_df, use_container_width=True, height=200)
+
+            st.subheader("Download")
+            dd1, dd2, dd3 = st.columns(3)
+            with dd1:
+                st.download_button(
+                    "⬇️ Unique emails (.xlsx)",
+                    data=to_excel_bytes(unique_df, "Unique"),
+                    file_name="unique_emails.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            with dd2:
+                st.download_button(
+                    "⬇️ Removed duplicates (.xlsx)",
+                    data=to_excel_bytes(duplicates_df, "Duplicates"),
+                    file_name="removed_duplicates.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    disabled=len(duplicates_df) == 0,
+                )
+            with dd3:
+                dedupe_buffer = BytesIO()
+                with pd.ExcelWriter(dedupe_buffer, engine="xlsxwriter") as writer:
+                    for name, d in [("Unique", unique_df), ("Removed Duplicates", duplicates_df)]:
+                        d.to_excel(writer, index=False, sheet_name=name)
+                        ws = writer.sheets[name]
+                        for i, col in enumerate(d.columns):
+                            width = max(d[col].astype(str).map(len).max() if len(d) else 0, len(col)) + 2
+                            ws.set_column(i, i, min(width, 60))
+                st.download_button(
+                    "⬇️ Full report, both tabs (.xlsx)",
+                    data=dedupe_buffer.getvalue(),
+                    file_name="deduplication_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+            if len(duplicates_df) == 0:
+                st.info("No duplicates found — your list was already clean.")
+    else:
+        st.info("Upload an Excel file to get started. It should have a column of email addresses "
+                "(any column name containing 'email' will be auto-detected).")

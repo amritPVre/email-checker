@@ -1,9 +1,23 @@
-# Bulk Email Validator (Streamlit)
+# Email Toolkit (Streamlit)
 
+Two tools in one app, as separate tabs:
+
+## 1. Email Validator
 Upload an Excel file of email addresses and get back:
 - A **Valid** list (.xlsx)
 - An **Invalid / Inactive** list (.xlsx)
 - A full report with an "Unknown/Risky" tab for anything inconclusive
+
+## 2. Duplicate Remover
+Upload an Excel file of email addresses and get back:
+- A **de-duplicated** list (first occurrence of each address kept)
+- A report of just the **removed duplicate rows**
+- A combined report with both as separate tabs
+
+Duplicate matching is case-insensitive and whitespace-trimmed by default, with an
+optional toggle to also treat Gmail dot-variants (`john.doe@gmail.com` vs.
+`johndoe@gmail.com`) as duplicates, since Gmail ignores dots and both deliver to
+the same inbox.
 
 ## Setup
 
